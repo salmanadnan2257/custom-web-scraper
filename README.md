@@ -172,6 +172,18 @@ doesn't blank out the whole row, and the function's only dependency is
 duck-typed attribute access, which made it possible to unit-test with plain
 fake objects instead of a real Selenium session.
 
+**A guard clause that looks like dead code but isn't.** While documenting
+`dropdown_var_detect()` for the Deep Dive, the line
+`if "instructions" not in globals(): return` initially read like a leftover
+defensive check with no real purpose, since `instructions` is assigned earlier in
+`build_ui()`. Tracing the actual order of execution showed it's load-bearing:
+setting the `OptionMenu`'s initial value fires the `StringVar` trace callback
+immediately, before `build_ui()` reaches the line further down that creates the
+`instructions` label widget, so without the guard the very first callback firing
+would raise `NameError` on startup. Worth calling out explicitly in the Deep Dive
+rather than describing it as boilerplate, since skimming the function in isolation
+gives the wrong impression.
+
 ## What I learned
 
 - `WebDriverWait` plus `expected_conditions` is the right tool for "did this
