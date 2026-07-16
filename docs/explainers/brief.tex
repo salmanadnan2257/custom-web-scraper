@@ -1,0 +1,303 @@
+% explainer-source-hash: 3545e9e2112977ac2ee390e08fc010506ae5e423e66d118f3678abcc3a4f799e
+% explainer-source-commit: a3b383a90a485c793e6efa6e9587845e06db8a96
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{\vspace{-1.5cm}\textbf{Custom Web Scraper}\\[0.3cm]
+\large The Brief: what it is, how it is built, where it is weak}
+\author{Portfolio explainer, built from the source}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\section*{In one paragraph}
+
+\begin{keyidea}{The project}
+A desktop application that opens a real Chrome browser, loads a web address you
+type, and then lets you interrogate that live page with any of seven Selenium
+locator strategies, showing every match in a table and outlining them in the
+browser itself. It exists because small scraping investigations do not deserve a
+throwaway Python script each: load the page once, then fire locator after locator
+at it from a graphical interface. Roughly 550 lines of Python in one file, with
+exactly one third-party dependency.
+\end{keyidea}
+
+\section{Why it is built the way it is}
+
+Two decisions define the project, and both are defensible.
+
+\textbf{It drives a real browser instead of downloading HTML.} The simple approach,
+fetching a page over HTTP and parsing the text, sees only the initial response.
+Most modern sites build their content afterwards with JavaScript running inside
+the browser, so that approach returns an empty shell. Selenium drives actual
+Chrome, so the page is fully rendered before anything is read. The price is a
+Chrome install and a window on your screen, and the project accepts it knowingly.
+
+\textbf{It is a GUI, not a library.} The target user is someone poking at an
+unfamiliar page for five minutes. The interface encodes that workflow directly:
+panel ``1. Load a page'', panel ``2. Find elements''. The order of operations is
+the layout.
+
+\section{Architecture}
+
+Three layers live in one file, separated by convention rather than by folders.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.95\textwidth}{!}{
+\begin{tikzpicture}[node distance=8mm]
+
+\node[box, minimum width=36mm] (ui) {\textbf{Tkinter layer}\\[2pt]
+  \scriptsize builds the window,\\
+  \scriptsize routes button clicks,\\
+  \scriptsize renders the results table};
+
+\node[box, minimum width=36mm, right=30mm of ui] (sel) {\textbf{Selenium layer}\\[2pt]
+  \scriptsize owns the browser,\\
+  \scriptsize navigates and waits,\\
+  \scriptsize runs the seven lookups};
+
+\node[box, minimum width=36mm, below=15mm of ui] (pure) {\textbf{Pure formatting layer}\\[2pt]
+  \scriptsize elements $\rightarrow$ plain tuples,\\
+  \scriptsize no driver, no globals,\\
+  \scriptsize testable in milliseconds};
+
+\node[extbox, minimum width=28mm, right=30mm of sel] (chrome) {\textbf{Real Chrome}};
+\node[extbox, minimum width=28mm, below=15mm of chrome] (web) {\textbf{The website}};
+
+\node[store, below=15mm of sel, minimum width=20mm] (state) {\scriptsize module globals\\\scriptsize \code{driver}\\\scriptsize \code{is\_request\_loaded}\\\scriptsize \code{last\_elements}};
+
+\draw[flow] (ui) -- node[lbl, above]{callbacks} (sel);
+\draw[flow] (sel) -- node[lbl, above]{WebDriver} (chrome);
+\draw[flow] (chrome) -- node[lbl, right]{HTTP} (web);
+\draw[flow] (sel) -- node[lbl, right]{elements} (state);
+\draw[dflow] (state) -- (pure);
+\draw[dflow] (pure) -- node[lbl, left]{rows} (ui);
+
+\begin{scope}[on background layer]
+\node[draw=linegrey, fill=softgrey, rounded corners, fit=(ui)(pure)(sel)(state),
+      inner sep=7mm, label={[font=\small\itshape, text=inkblue]above:main.py}] {};
+\end{scope}
+\end{tikzpicture}}
+\caption{Three layers, three shared globals, two things outside the process.}
+\end{figure}
+
+The \textbf{pure formatting layer} is the part worth pointing at. It converts
+Selenium's live element handles into flat display tuples, and it does so without
+touching the driver or any global: it only calls \code{.tag\_name}, \code{.text}
+and \code{.get\_attribute()} on whatever object it is handed. Any object with those
+three members will do, so it can be tested with a five-line fake class, no browser
+and no network. That is a real design decision, and it is the strongest thing in
+the codebase.
+
+The rest of the file cannot make that claim, and the reason is the box in the
+middle of the diagram: \code{driver}, \code{is\_request\_loaded} and
+\code{last\_elements} are module-level globals that six functions reach into
+directly.
+
+\section{How one lookup flows}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[node distance=7mm]
+\node[box] (url) {Type a URL,\\click Request};
+\node[box, right=12mm of url] (get) {\code{driver.get(url)}\\wait for html, body};
+\node[box, right=12mm of get] (pick) {Pick a strategy\\+ type a value};
+\node[dec, right=13mm of pick] (d) {locator\\matches?};
+\node[box, below=12mm of d] (find) {\code{find\_elements()}\\returns all matches};
+\node[box, left=13mm of find] (rows) {format to tuples};
+\node[box, left=13mm of rows] (win) {new window\\with a table};
+\node[box, fill=white, draw=warnred, text=warnred, right=13mm of d] (err) {status bar:\\``enter a valid X''};
+
+\draw[flow] (url) -- (get);
+\draw[flow] (get) -- (pick);
+\draw[flow] (pick) -- (d);
+\draw[flow] (d) -- node[lbl, right]{yes, within 10s} (find);
+\draw[flow] (find) -- (rows);
+\draw[flow] (rows) -- (win);
+\draw[flow, draw=warnred] (d) -- node[lbl, above]{timeout} (err);
+\end{tikzpicture}}
+\caption{The path of a single lookup. The ``timeout'' branch also fires when a
+perfectly valid locator simply matches nothing, which is the source of the
+mislabelled-error defect in Section~\ref{sec:weak}.}
+\end{figure}
+
+The seven strategies are class, ID, name, tag name, link text, partial link text
+and XPath, held in a \code{LOCATOR\_DISPATCH} dictionary keyed by the dropdown's
+label. The dropdown's initial value, \code{"Select"}, is deliberately absent from
+that dictionary, so a missing key doubles as the ``you have not picked one yet''
+check with no second list to keep in sync.
+
+Each lookup waits before it finds. A ten-second
+\code{WebDriverWait} on \code{presence\_of\_element\_located} blocks until at
+least one match exists, and then \code{find\_elements} collects all of them.
+This is the correct pattern for a page that may still be rendering, and the
+project uses it consistently rather than sleeping and hoping.
+
+\section{Features of substance}
+
+\begin{itemize}
+\item \textbf{Highlight in Browser.} After a lookup, this injects a few lines of
+  JavaScript into the live page via \code{execute\_script}, outlining each matched
+  element in pink and scrolling it into view. It closes the loop between ``my
+  locator matched 12 things'' and ``are they the 12 I meant?'', which is the
+  entire question a locator-testing tool exists to answer. The best feature here.
+\item \textbf{Status bar.} A single line, recoloured by severity from a three-key
+  dictionary, reporting every step. A \code{root.update\_idletasks()} call forces
+  the ``Loading page\ldots'' repaint before the browser blocks the event loop, so
+  the window does not simply appear to freeze.
+\item \textbf{Session history.} Both text fields are comboboxes backed by one
+  shared 10-entry most-recently-used list. In memory only; it dies with the
+  process, which the README states plainly.
+\item \textbf{Contextual instructions.} A label under the dropdown rewrites itself
+  per strategy through a \code{StringVar} trace callback.
+\item \textbf{Portable driver resolution.} \code{CHROMEDRIVER\_PATH} points at a
+  specific binary; unset, Selenium Manager fetches the right one automatically.
+  This replaced a driver path hardcoded to a Windows folder on the original
+  author's machine, which meant the project ran on exactly one computer on
+  earth. It is the best ``portability problem I solved'' story here.
+\end{itemize}
+
+\section{Where it is weak}
+\label{sec:weak}
+
+\begin{honest}{The README claims a test suite the repository does not contain}
+The README states that a 7-case unit suite and a full window test pass, and
+refers the reader to a ``Test plan'' section for the command and output. That
+section does not exist, and no test file has ever been committed: \code{git
+ls-files} lists eight files, none a test, and a search of every commit for every
+file ever added confirms it was never there.
+
+The claims themselves appear to be true. Equivalent tests written from scratch for
+this document reproduced every stated behaviour. So the tests were evidently
+written and run but never committed, and the dangling cross-reference is what
+exposes it. This is the project's most urgent problem, and it is not in the code:
+an interviewer who reads ``all 7 cases pass; see Test plan below'' will go looking
+and find nothing. Commit the tests or drop the claim.
+\end{honest}
+
+\begin{honest}{Two further README claims the code contradicts}
+\textbf{The results table is not sortable}, though the opening paragraph says it
+is. \code{ttk.Treeview} sorts only when a command is bound to each column heading,
+and none is bound.
+
+\textbf{\code{temp.py} and \code{temp1.py} are not ``still visible in the source
+history''.} The BeautifulSoup draft they refer to may have existed locally, but
+this repository has four commits and has never contained a file by either name.
+\end{honest}
+
+\begin{honest}{Real defects in the code}
+\begin{itemize}
+\item \textbf{``No matches'' is reported as ``please enter a valid class name''.}
+  Because the wait must succeed before \code{find\_elements} runs, a locator that
+  matches nothing always times out first. The zero-match handling that follows,
+  the count of 0, the disabled button, the ``No elements matched'' label, is
+  therefore unreachable, and a valid locator gets blamed on a typo the user did
+  not make. Confirmed by forcing the branch with a stubbed wait: the code is
+  correct, just unreachable.
+\item \textbf{\code{is\_request\_loaded} is set before the load is confirmed}, so
+  a page-load timeout leaves the app believing a page is ready when it is not.
+\item \textbf{Only \code{InvalidArgumentException} is caught around
+  \code{driver.get}}, so a dead host or crashed browser escapes as a raw traceback
+  while the GUI sits on ``Loading page\ldots''. For a tool whose selling point is
+  never failing silently, that is the gap.
+\item \textbf{Stale highlight state.} \code{last\_elements} and the highlight
+  button are never reset on navigation or after a failed lookup, so the button
+  stays enabled pointing at a previous page's elements.
+\item \textbf{Every lookup opens a new window} and none is ever closed, so the
+  core workflow of trying locator after locator is also what buries the screen.
+\end{itemize}
+\end{honest}
+
+\begin{honest}{The globals, and the seven near-identical functions}
+The seven \code{get\_element\_by\_*} functions differ only in one \code{By}
+constant and one error string; the guard, the wait, the exception handler and the
+return shape are copied seven times. \code{LOCATOR\_DISPATCH} removed the
+\code{if}/\code{elif} chain in the caller but left the duplication in the callees.
+
+All seven read \code{driver} from module scope rather than receiving it, so none
+can be tested without patching the module, and the app structurally cannot hold
+two sessions. \code{driver} is not even given a module-level default; it exists
+only once the \code{\_\_main\_\_} block assigns it, so importing the module and
+calling anything raises \code{NameError} until a fake is patched in.
+
+The README says all of this about itself, unprompted, which counts for something.
+The fair framing is not ``this is wrong'' but ``this traded testability for
+brevity in a 550-line single-window tool, knowingly''. The fix is a small class
+holding \code{driver} and \code{is\_request\_loaded} as instance attributes.
+\end{honest}
+
+\section{What it gets right}
+
+\begin{itemize}
+\item The pure formatting layer, and specifically the choice to wrap \emph{each
+  field access} in a small exception-swallowing helper rather than the whole row,
+  so an element going stale mid-read still yields a partial row. That granularity
+  shows the stale-element problem was understood, not just caught.
+\item Truncation that is actually correct: 200 characters in gives exactly 80 out,
+  ellipsis included in the budget rather than pushed past it. Verified.
+\item A dependency range chosen for a reason: \code{selenium>=4.15,<5}, floored
+  above the 4.6 release that introduced Selenium Manager, ceilinged below the next
+  major version's licence to break the API.
+\item Toolkit fluency in small places: \code{update\_idletasks} before a blocking
+  call, \code{rowconfigure} weights so the table absorbs resize, the \code{clam}
+  theme wrapped in a \code{try}/\code{except} because it is not on every platform.
+\item One genuinely subtle guard, \code{if "instructions" not in globals():
+  return}, which looks like dead paranoia and is not: constructing the dropdown
+  writes its variable and fires the trace callback immediately, tens of lines
+  before the label it updates is created. Without it, startup raises
+  \code{NameError} every time.
+\end{itemize}
+
+\section{Verified for this document}
+
+\begin{itemize}
+\item \code{py\_compile} clean on Python 3.12.3 with selenium 4.45.0.
+\item The formatting functions driven with fake duck-typed elements: truncation,
+  whitespace collapsing, attribute filtering, 1-based numbering, and a fully stale
+  element yielding \code{(3, '?', '', '')}. All as described.
+\item The entire window built and driven on a real display against a fake driver:
+  load, lookup, results table, and highlight all produced the expected status text
+  and the expected 2 \code{execute\_script} calls.
+\item Repository history searched: no test file, no \code{temp.py}, ever.
+\end{itemize}
+
+\textbf{Not verified:} a live Chrome session against a real site, and the
+highlight JavaScript against a real DOM. Both need Chrome plus network access for
+Selenium Manager. The Selenium API used is standard 4.x, but that claim rests on
+inspection, not execution.
+
+\section*{Glossary}
+
+\begin{description}[leftmargin=0pt, style=nextline, itemsep=3pt]
+\item[DOM] The browser's live in-memory tree of a page, built from its HTML. What
+  Selenium actually queries.
+\item[Element] One node of that tree: a link, a paragraph, an image.
+\item[Locator] A rule for finding elements, in two halves: a strategy (by class?
+  by ID?) and a value (which class?). The split the whole interface is built on.
+\item[Selenium / WebDriver] A library, and the standard protocol it speaks, for
+  remote-controlling a real browser from code.
+\item[Selenium Manager] Bundled since selenium 4.6; detects your Chrome and
+  downloads a matching driver, removing the version-matching chore by hand.
+\item[Tkinter / ttk] Python's built-in GUI toolkit, and its themed widget set.
+\item[Event loop] The endless wait-for-input, call-the-callback cycle a GUI runs
+  in. \code{root.mainloop()} enters it and does not return until the window closes.
+\item[Callback] A function registered to run when something happens, such as a
+  button being clicked.
+\item[Duck typing] Python's rule that only an object's methods matter, not its
+  type. What makes the formatting layer testable with fakes.
+\item[Stale element reference] The error raised when you read an element handle
+  after the page has re-rendered underneath it. Routine on modern sites.
+\item[XPath] A query language for walking a document tree, and the escape hatch
+  that expresses what the other six strategies cannot.
+\item[Headless] Running the browser with no visible window. Enabled here by
+  setting \code{SCRAPER\_HEADLESS=1}.
+\end{description}
+
+\end{document}

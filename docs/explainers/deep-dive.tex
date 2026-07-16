@@ -1,0 +1,1137 @@
+% explainer-source-hash: 3545e9e2112977ac2ee390e08fc010506ae5e423e66d118f3678abcc3a4f799e
+% explainer-source-commit: a3b383a90a485c793e6efa6e9587845e06db8a96
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{\vspace{-1.5cm}\textbf{Custom Web Scraper}\\[0.3cm]
+\large A Deep Dive, from zero prior knowledge}
+\author{Portfolio explainer, built from the source}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{keyidea}{The one-sentence version}
+\file{custom-web-scraper} is a desktop application that opens a real Chrome
+browser, points it at a web address you type, and then lets you ask that page
+questions like ``show me every element whose class is \code{product-title}'',
+answering in a table instead of making you write a fresh Python script each time.
+\end{keyidea}
+
+\noindent This document assumes you know nothing about web scraping, browsers, or
+Python graphical applications. Every term is defined the first time it appears.
+It covers the whole project: all 551 lines of it, in one file, plus its
+configuration and its dependency. It is honest about what the code does well and
+what it does badly, because it exists to prepare its owner to defend the project
+in an interview, not to flatter it.
+
+\tableofcontents
+\newpage
+
+\section{What problem does this solve?}
+
+\subsection{Starting from the very beginning}
+
+\begin{jargon}{Web page, HTML and the DOM}
+A web page arrives at your computer as \textbf{HTML}: a text document made of
+nested tags such as \code{<p>Hello</p>} or
+\code{<a href="/next">Next page</a>}. The browser parses that text into a live
+tree of objects in memory called the \textbf{DOM} (Document Object Model). ``The
+DOM'' is simply the browser's in-memory picture of the page. When people say a
+page ``changed without reloading'', they mean a program edited the DOM.
+\end{jargon}
+
+\begin{jargon}{Web scraping}
+\textbf{Scraping} means extracting data out of a web page automatically, rather
+than reading it with your eyes. If you wanted the price of every item in an
+online shop, scraping is writing a program that finds each price element and
+reads its text.
+\end{jargon}
+
+\begin{jargon}{Element and locator}
+An \textbf{element} is one node of the DOM tree: one link, one paragraph, one
+image. A \textbf{locator} is a rule for finding elements, for example ``every
+element whose class attribute is \code{price}''. A locator has two halves: a
+\emph{strategy} (search by class? by ID? by tag?) and a \emph{value} (which
+class? which ID?). That two-part split is the single most important idea in this
+whole application, and it is exactly what its user interface exposes.
+\end{jargon}
+
+\subsection{The workflow this replaces}
+
+Suppose you want to poke at an unfamiliar page: what links are on it, what is
+inside a particular section, does this XPath actually match what you think it
+matches. The traditional answer is to write a small throwaway Python script,
+run it, read the output, edit the script, run it again. Each question costs an
+edit-run cycle, and each new site costs a whole new script.
+
+This project's premise, stated plainly in its README, is that those small
+investigations do not need a script; they need a few minutes of poking. So it
+turns the loop inside out: load the page once into a browser that stays open,
+then fire locator after locator at that same live page from a graphical
+interface, with no code involved and no reload between attempts.
+
+\begin{keyidea}{Why a real browser, and not a simple download?}
+The naive way to scrape is to download the page's HTML text over the network and
+search it. That fails on any \textbf{JavaScript-rendered} page, which means most
+modern sites. The first HTML response for such a page is nearly empty; the actual
+content is created afterwards by code that runs \emph{inside the browser}. If you
+never run a browser, you never see that content. Driving real Chrome means the
+page is fully built, exactly as a human would see it, before this tool reads
+anything. The cost of that choice is that you must have Chrome installed and a
+window opens on your screen.
+\end{keyidea}
+
+\begin{jargon}{Selenium and WebDriver}
+\textbf{Selenium} is a Python library for remote-controlling a real browser.
+It speaks \textbf{WebDriver}, a standard protocol that browsers implement, via a
+small helper program (for Chrome, \code{chromedriver}). Your Python code says
+``navigate here'', ``find these elements'', and the browser obeys. The
+\code{driver} object in this project is the handle on that browser session.
+\end{jargon}
+
+\begin{jargon}{Tkinter}
+\textbf{Tkinter} is the graphical user interface toolkit that ships inside Python
+itself. It gives you windows, buttons, text fields and tables without installing
+anything. \code{ttk} is its themed widget set, a more modern-looking layer over
+the same toolkit. This project mixes both, a point returned to in
+Section~\ref{sec:honest}.
+\end{jargon}
+
+\section{The shape of the project on disk}
+
+The entire application is one Python file. There is no package, no module tree,
+no test directory.
+
+\begin{figure}[H]
+\centering
+\begin{forest} dirtree
+[custom-web-scraper
+  [main.py {\rmfamily\quad\itshape the whole application, 551 lines}]
+  [requirements.txt {\rmfamily\quad\itshape one line: selenium>=4.15,<5}]
+  [.env.example {\rmfamily\quad\itshape the two optional settings}]
+  [.gitignore]
+  [LICENSE {\rmfamily\quad\itshape PolyForm Strict 1.0.0}]
+  [README.md]
+  [docs
+    [screenshots
+      [app.png]
+    ]
+    [explainers
+      [deep-dive.pdf {\rmfamily\quad\itshape this document}]
+      [brief.pdf]
+    ]
+  ]
+]
+\end{forest}
+\caption{Every tracked file. The application is \file{main.py} and nothing else.}
+\end{figure}
+
+\begin{keyidea}{One file is a defensible choice here}
+A single 551-line script for a single-window tool is not a flaw by itself.
+Splitting it into six modules would add navigation cost without removing any
+complexity. What \emph{is} a flaw is how that file shares its state, which
+Section~\ref{sec:globals} covers in detail.
+\end{keyidea}
+
+\section{Architecture: three layers, one file}
+
+The code separates into three layers. They are not marked by folders or classes,
+only by convention and comment banners inside \file{main.py}, but the separation
+is real and it is the most interesting design decision in the project.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[node distance=8mm]
+
+\node[box, minimum width=38mm] (ui) {\textbf{Tkinter layer}\\[2pt]
+  \scriptsize \code{build\_ui()}\\
+  \scriptsize \code{set\_status()}, \code{add\_to\_history()}\\
+  \scriptsize \code{on\_get\_elements\_click()}\\
+  \scriptsize \code{dropdown\_var\_detect()}\\
+  \scriptsize \code{show\_data()}};
+
+\node[box, minimum width=38mm, right=34mm of ui] (sel) {\textbf{Selenium layer}\\[2pt]
+  \scriptsize \code{build\_driver()}\\
+  \scriptsize \code{load\_html()}\\
+  \scriptsize seven \code{get\_element\_by\_*()}\\
+  \scriptsize \code{highlight\_in\_browser()}};
+
+\node[box, minimum width=38mm, below=16mm of ui] (pure) {\textbf{Pure formatting layer}\\[2pt]
+  \scriptsize \code{\_safe\_call()}\\
+  \scriptsize \code{summarize\_element()}\\
+  \scriptsize \code{build\_result\_rows()}};
+
+\node[extbox, minimum width=30mm, right=34mm of sel] (chrome) {\textbf{Real Chrome}\\\scriptsize a live browser window};
+\node[extbox, minimum width=30mm, below=16mm of chrome] (web) {\textbf{The website}\\\scriptsize over the network};
+
+\node[store, below=16mm of sel, minimum width=20mm] (state) {\scriptsize module globals\\\scriptsize \code{driver}\\\scriptsize \code{is\_request\_loaded}\\\scriptsize \code{last\_elements}};
+
+\draw[flow] (ui) -- node[lbl, above]{button\\callbacks} (sel);
+\draw[flow] (sel) -- node[lbl, above]{WebDriver\\protocol} (chrome);
+\draw[flow] (chrome) -- node[lbl, right]{HTTP} (web);
+\draw[flow] (sel) -- node[lbl, right]{list of\\WebElements} (state);
+\draw[dflow] (state) -- node[lbl, above]{plain rows} (pure);
+\draw[dflow] (pure) -- node[lbl, left]{tuples for\\the table} (ui);
+
+\begin{scope}[on background layer]
+\node[draw=linegrey, fill=softgrey, rounded corners, fit=(ui)(pure)(sel)(state),
+      inner sep=8mm, label={[font=\small\itshape, text=inkblue]above:main.py}] {};
+\end{scope}
+\end{tikzpicture}}
+\caption{The three layers, the state they share, and the two things outside the
+process. Solid arrows are commands going out; dashed arrows are display data
+coming back.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Why the third layer exists}
+
+The \textbf{pure formatting layer} is the part worth defending in an interview.
+Its job is to turn Selenium's live element objects into flat tuples the table can
+show. It is called \emph{pure} because it never touches \code{driver}, reads no
+global, and only calls read-only methods on whatever object it is handed.
+
+\begin{keyidea}{Duck typing is what makes this testable}
+\textbf{Duck typing} is the Python principle that an object's type does not
+matter, only whether it has the methods you call (``if it walks like a duck''
+\ldots). \code{summarize\_element} only ever reads \code{.tag\_name},
+\code{.text} and \code{.get\_attribute(...)}. So a five-line fake class with
+those three members is indistinguishable from a real Selenium element as far as
+this function can tell. That means the formatting logic can be tested in
+milliseconds with no browser, no network and no window. The rest of the file
+cannot make that claim.
+\end{keyidea}
+
+\section{Startup: what happens when you run it}
+
+\begin{lstlisting}[language=Python, caption={The entry point, the last five lines of main.py}]
+if __name__ == "__main__":
+    driver = build_driver()
+    build_ui()
+    root.mainloop()
+    driver.quit()
+\end{lstlisting}
+
+\begin{jargon}{The \code{\_\_name\_\_ == "\_\_main\_\_"} guard}
+Python sets the variable \code{\_\_name\_\_} to the string \code{"\_\_main\_\_"}
+when a file is run directly, but to the module's name when it is imported by
+another file. So this block runs only on \code{python main.py}, and is skipped on
+\code{import main}. That is what lets a test import the file and call individual
+functions without launching Chrome.
+\end{jargon}
+
+\begin{jargon}{The event loop (\code{mainloop})}
+A graphical program does not run top to bottom and exit. It enters an
+\textbf{event loop}: an endless cycle of ``wait for the user to do something,
+find the function registered for that something, call it, repeat''. Those
+registered functions are \textbf{callbacks}. \code{root.mainloop()} is that
+cycle, and it does not return until the window is closed, which is why
+\code{driver.quit()} sits after it.
+\end{jargon}
+
+\subsection{\code{build\_driver()}: getting a browser}
+
+\begin{lstlisting}[language=Python, caption={Driver construction, simplified to its decisions}]
+chrome_options = Options()
+if os.environ.get("SCRAPER_HEADLESS", "").lower() in ("1", "true", "yes"):
+    chrome_options.add_argument("--headless=new")
+
+chromedriver_path = os.environ.get("CHROMEDRIVER_PATH", "").strip()
+service = Service(chromedriver_path) if chromedriver_path else Service()
+
+new_driver = webdriver.Chrome(service=service, options=chrome_options)
+new_driver.maximize_window()
+return new_driver
+\end{lstlisting}
+
+Two decisions live here, both driven by \textbf{environment variables}.
+
+\begin{jargon}{Environment variable}
+A named value the operating system hands to a program when it starts, set outside
+the code (\code{SCRAPER\_HEADLESS=1 python main.py}). It is the standard way to
+configure a program per-machine without editing its source, which matters here
+because the two settings differ between the developer's laptop and any other.
+\end{jargon}
+
+\begin{itemize}
+\item \code{SCRAPER\_HEADLESS}, if set to \code{1}, \code{true} or \code{yes},
+  adds the \code{--headless=new} flag, so Chrome runs with no visible window.
+  Note the accepted values are checked after \code{.lower()}, so \code{TRUE}
+  works and \code{yes please} does not.
+\item \code{CHROMEDRIVER\_PATH}, if set, points at a specific
+  \code{chromedriver} binary. If it is empty, \code{Service()} is constructed
+  with no argument and \textbf{Selenium Manager} takes over.
+\end{itemize}
+
+\begin{keyidea}{Selenium Manager, and the portability bug it fixed}
+Historically you had to download a \code{chromedriver} whose version matched your
+installed Chrome exactly, and re-download it every time Chrome auto-updated.
+Selenium 4.6 and later ship \textbf{Selenium Manager}, which detects your Chrome
+and fetches the right driver by itself. The README records that this project's
+original version hardcoded a Windows path,
+\code{C:\textbackslash Development\textbackslash chromedriver.exe},
+so it ran on exactly one machine on earth. The
+environment-variable-with-fallback pattern here is the fix, and it is a genuinely
+good answer to ``tell me about a portability problem you solved''.
+\end{keyidea}
+
+\begin{honest}{\code{maximize\_window()} is called even when headless}
+\code{build\_driver} calls \code{new\_driver.maximize\_window()} unconditionally,
+including in the headless path where there is no window on screen to maximize. In
+practice modern headless Chrome tolerates this and simply sets a large viewport,
+so it is harmless rather than broken, but it reads as an oversight: the call was
+written for the visible case and never revisited for the headless one. Flagged as
+\emph{inferred} intent; the code carries no comment either way.
+\end{honest}
+
+\section{Loading a page: \code{load\_html()}}
+
+\begin{lstlisting}[language=Python, caption={load\_html, in full}]
+def load_html():
+    global is_request_loaded
+    url = request_url_entry.get().strip()
+    set_status("Loading page...", "info")
+    root.update_idletasks()
+    try:
+        driver.get(url)
+        is_request_loaded = True
+    except InvalidArgumentException:
+        set_status("Please enter a valid URL", "error")
+        return
+
+    try:
+        WebDriverWait(driver, 10).until(ec.presence_of_element_located((By.CSS_SELECTOR, "html")))
+        WebDriverWait(driver, 10).until(ec.presence_of_element_located((By.CSS_SELECTOR, "body")))
+    except TimeoutException:
+        set_status("Network error: the page did not load in time", "error")
+        return
+
+    add_to_history(request_url_entry, url)
+    set_status(f"Loaded {url}", "success")
+\end{lstlisting}
+
+\subsection{The \code{update\_idletasks} call}
+
+\code{set\_status("Loading page...")} changes a label's text, but Tkinter does not
+repaint the screen until the event loop next gets a turn, and the loop is about to
+be blocked for seconds inside \code{driver.get}. Without
+\code{root.update\_idletasks()}, which forces the pending redraw to happen
+immediately, the user would never see ``Loading page\ldots''; the window would
+simply freeze and then show the finished state. It is one line, easy to skim past,
+and it is the difference between an app that looks broken and one that does not.
+
+\subsection{Waiting properly}
+
+\begin{jargon}{\code{WebDriverWait} and expected conditions}
+A page loads over an unpredictable amount of time. \code{WebDriverWait(driver,
+10).until(condition)} polls repeatedly for up to 10 seconds until
+\code{condition} is true, then returns instantly. If the 10 seconds elapse first,
+it raises \code{TimeoutException}. The condition used here,
+\code{presence\_of\_element\_located}, means ``an element matching this locator
+now exists in the DOM''. The alternative, \code{time.sleep(5)}, is both slower
+than necessary when the page is fast and flaky when it is slow. This is the
+correct tool and the project uses it consistently.
+\end{jargon}
+
+The function waits for \code{<html>} and then \code{<body>} to exist. Both are
+present in essentially any successful page load, so this is a broad ``did we get
+a document at all'' check rather than a ``is the content ready'' one.
+
+\begin{honest}{Two real defects in this function}
+\begin{enumerate}
+\item \textbf{\code{is\_request\_loaded} is set too early.} It becomes
+  \code{True} the moment \code{driver.get} returns, \emph{before} the
+  \code{<html>}/\code{<body>} wait. If that wait then times out, the function
+  reports a network error and returns, but the flag is left \code{True}. The
+  application now believes a page is loaded when it is not, and every subsequent
+  locator lookup will sail past its guard and fail in a more confusing way. The
+  flag should be set on the last line, next to the success message.
+\item \textbf{Only one exception type is caught.} \code{InvalidArgumentException}
+  covers a malformed URL such as \code{notaurl}. But \code{driver.get} can also
+  raise \code{WebDriverException} for a host that does not resolve, a refused
+  connection, or a browser that has crashed. None of those are caught, so they
+  escape the callback and print a raw traceback to the terminal while the GUI
+  just sits there, status bar still reading ``Loading page\ldots''. For a tool
+  whose selling point is that it never fails silently, this is the gap.
+\end{enumerate}
+\end{honest}
+
+\section{The seven locator functions}
+
+This is the heart of the tool, and also its most repetitive code. There are seven
+functions, one per Selenium locator strategy.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Dropdown label} & \textbf{Function} & \textbf{Selenium strategy} \\
+\midrule
+Class             & \code{get\_element\_by\_class\_name}        & \code{By.CLASS\_NAME} \\
+ID                & \code{get\_element\_by\_id}                 & \code{By.ID} \\
+Partial Link Text & \code{get\_element\_by\_partial\_link\_text} & \code{By.PARTIAL\_LINK\_TEXT} \\
+Link Text         & \code{get\_element\_by\_link\_text}          & \code{By.LINK\_TEXT} \\
+Name              & \code{get\_element\_by\_name}                & \code{By.NAME} \\
+Tag Name          & \code{get\_element\_by\_tag\_name}           & \code{By.TAG\_NAME} \\
+XPath             & \code{get\_element\_by\_xpath}               & \code{By.XPATH} \\
+\bottomrule
+\end{tabular}
+\caption{\code{LOCATOR\_DISPATCH}: the seven strategies the GUI offers, and the
+Selenium constant each one maps to.}
+\end{table}
+
+\begin{jargon}{The attributes these search on}
+\code{id} is meant to be unique on a page; \code{class} is a shared style label
+and usually matches many elements; \code{name} is used by form fields; a
+\textbf{tag name} is the element type itself (\code{a}, \code{div},
+\code{p}). \textbf{Link text} matches an \code{<a>} element by the words a user
+actually sees, and the partial variant matches a substring of them.
+\textbf{XPath} is a small query language for walking the document tree, for
+example \code{//div[@class='x']/a}, and it is the escape hatch that can express
+anything the other six cannot.
+\end{jargon}
+
+Every one of the seven has the identical shape:
+
+\begin{lstlisting}[language=Python, caption={get\_element\_by\_class\_name; the other six differ only in the By constant and the error string}]
+def get_element_by_class_name(class_name):
+    global is_request_loaded
+    if not is_request_loaded:
+        set_status("Please request a URL first", "error")
+        return None, None
+    try:
+        WebDriverWait(driver, 10).until(ec.presence_of_element_located((By.CLASS_NAME, class_name)))
+        value = driver.find_elements(By.CLASS_NAME, class_name)
+    except TimeoutException:
+        set_status("Please enter a valid class name", "error")
+        return None, None
+    return True, value
+\end{lstlisting}
+
+\subsection{Wait, then find: why both calls?}
+
+The pairing is deliberate. A \code{WebDriverWait} on
+\code{presence\_of\_element\_located} blocks until \emph{at least one} match exists, which handles the
+case where JavaScript has not yet inserted the element. Then
+\code{find\_elements} (plural) fetches \emph{all} of them. Using
+\code{find\_elements} alone would return an empty list immediately on a page still
+rendering; using the wait alone would return only the first match.
+
+\begin{jargon}{The \code{(condition, data)} return convention}
+Each function returns a two-item tuple. On success: \code{(True, [elements])}. On
+any failure: \code{(None, None)}, having already displayed its own error message.
+The caller therefore only has to check the first item. It is a hand-rolled
+version of what other languages express with a \code{Result} type. It works, but
+returning \code{None} rather than \code{False} for the failure flag is loose:
+the caller tests \code{if not condition}, which treats both the same, so nothing
+breaks, but the type is inconsistent with the \code{True} on the success path.
+\end{jargon}
+
+\begin{honest}{Seven copies of the same twelve lines}
+The only differences between these functions are the \code{By} constant and the
+wording of one error string. The \code{is\_request\_loaded} guard, the
+\code{WebDriverWait}, the \code{TimeoutException} handler and the return shape are
+duplicated seven times. A single function taking the strategy as an argument, with
+the labels in a table, would collapse all seven into roughly fifteen lines total.
+The README acknowledges this directly and honestly: a fix in one has to be
+hand-copied to the other six.
+
+Worth noting what the project \emph{did} fix. \code{LOCATOR\_DISPATCH} replaced an
+\code{if}/\code{elif} chain in the click handler, so adding an eighth strategy no
+longer means editing the dispatch logic. That is the right instinct applied one
+level too shallowly: the table removed the duplication in the \emph{caller} but
+left it in the \emph{callees}.
+\end{honest}
+
+\begin{honest}{The zero-match branches are unreachable (verified, not guessed)}
+\code{on\_get\_elements\_click} carefully handles a count of zero: it picks the
+\code{"info"} status color rather than \code{"success"}, disables the highlight
+button, and \code{show\_data} renders a ``No elements matched this locator.''
+label when there are no rows.
+
+None of that can ever run. Reaching \code{find\_elements} at all requires the
+\code{WebDriverWait} on the same locator to have already succeeded, which means at
+least one match exists. If nothing matches, the wait raises
+\code{TimeoutException} and the function returns \code{(None, None)}, so the
+caller returns before any of the zero-handling code. The only way to see a count
+of zero is a page mutating in the milliseconds between the wait and the find.
+
+This was confirmed by driving the real code with a fake driver and a stubbed
+\code{WebDriverWait}: with the wait forced to succeed, a zero-element result does
+produce ``Found 0 elements'' and a disabled button, proving the branch is written
+correctly. It is simply not reachable through the front door.
+
+The user-visible consequence is a mislabelled error. A locator that is perfectly
+valid but happens to match nothing reports ``Please enter a valid class name'',
+blaming the user for a typo they did not make. The honest message would be
+``no elements matched'', and the code to display it already exists.
+\end{honest}
+
+\section{The click handler and the full data flow}
+
+\begin{lstlisting}[language=Python, caption={on\_get\_elements\_click, the function that ties the layers together}]
+def on_get_elements_click():
+    global is_request_loaded
+    if not is_request_loaded:
+        set_status("Please request a URL first", "error")
+        return
+
+    locator_type = dropdown_var.get()
+    lookup = LOCATOR_DISPATCH.get(locator_type)
+    if lookup is None:
+        set_status("Pick a locator strategy first", "error")
+        return
+
+    locator_value = get_element_by_entry.get().strip()
+    condition, data = lookup(locator_value)
+    if not condition:
+        return
+
+    add_to_history(get_element_by_entry, locator_value)
+    count = len(data)
+    set_status(f"Found {count} element{'s' if count != 1 else ''}", "success" if count else "info")
+    highlight_button.config(state="normal" if count else "disabled")
+    show_data(data)
+\end{lstlisting}
+
+The dropdown starts out holding the string \code{"Select"}. That string is
+deliberately \emph{not} a key in the dispatch table, so \code{.get()} returns
+\code{None} and the user is told to pick a strategy first. Using the
+dictionary's own miss as the validation check is neat: there is no second list
+of valid strategies to keep in sync with the first.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+
+\node[box]                       (click)  at (0,0)      {User clicks ``Get Elements''};
+\node[dec]                       (d1)     at (0,-1.9)   {page\\loaded?};
+\node[dec]                       (d2)     at (0,-4.0)   {strategy\\picked?};
+\node[box]                       (lookup) at (0,-6.1)   {\code{LOCATOR\_DISPATCH} selects\\one of seven lookup functions};
+\node[box]                       (wait)   at (0,-8.0)   {\code{WebDriverWait(10s)}\\until at least one match exists};
+\node[dec]                       (d3)     at (0,-10.1)  {timed\\out?};
+\node[box]                       (find)   at (0,-12.0)  {\code{find\_elements()} returns every match};
+\node[box]                       (store)  at (0,-13.7)  {\code{last\_elements} global updated};
+\node[box]                       (rows)   at (0,-15.4)  {\code{build\_result\_rows()}: WebElement $\rightarrow$ tuple};
+\node[box]                       (tree)   at (0,-17.1)  {\code{Toplevel} window with a \code{Treeview}};
+
+\node[box, fill=white, draw=warnred, text=warnred] (err) at (6.4,-4.0)
+     {status bar shows\\an error, stop};
+
+\draw[flow] (click)  -- (d1);
+\draw[flow] (d1)     -- node[lbl, right]{yes} (d2);
+\draw[flow] (d2)     -- node[lbl, right]{yes} (lookup);
+\draw[flow] (lookup) -- (wait);
+\draw[flow] (wait)   -- (d3);
+\draw[flow] (d3)     -- node[lbl, right]{no} (find);
+\draw[flow] (find)   -- (store);
+\draw[flow] (store)  -- (rows);
+\draw[flow] (rows)   -- (tree);
+
+\draw[flow, draw=warnred] (d1) -| node[lbl, pos=0.25, above]{no} (err.north);
+\draw[flow, draw=warnred] (d2) -- node[lbl, above]{no} (err.west);
+\draw[flow, draw=warnred] (d3) -| node[lbl, pos=0.25, above]{yes} (err.south);
+\end{tikzpicture}
+\caption{The full path of one lookup. Note that the ``timed out'' branch is the
+one that fires when a locator simply matches nothing, which is why its error
+message is misleading.}
+\label{fig:flow}
+\end{figure}
+
+\section{The pure formatting layer}
+\label{sec:pure}
+
+\begin{lstlisting}[language=Python, caption={The formatting layer, in full}]
+ATTRIBUTES_TO_SHOW = ("id", "class", "name", "href", "src", "type", "value")
+
+def _safe_call(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+def summarize_element(element, index, text_limit=80):
+    tag = _safe_call(lambda: element.tag_name) or "?"
+
+    text = _safe_call(lambda: element.text) or ""
+    text = " ".join(text.split())
+    if len(text) > text_limit:
+        text = text[: text_limit - 1] + "…"
+
+    attr_parts = []
+    for attr in ATTRIBUTES_TO_SHOW:
+        value = _safe_call(lambda a=attr: element.get_attribute(a))
+        if value:
+            attr_parts.append(f"{attr}={value}")
+    attributes = ", ".join(attr_parts)
+
+    return index, tag, text, attributes
+
+def build_result_rows(elements, text_limit=80):
+    return [summarize_element(el, i + 1, text_limit=text_limit) for i, el in enumerate(elements)]
+\end{lstlisting}
+
+\subsection{\code{\_safe\_call} and the stale element problem}
+
+\begin{jargon}{Stale element reference}
+A Selenium element object is a \emph{handle} pointing into the live browser, not a
+copy of the data. If the page re-renders between the moment you find an element
+and the moment you read it, that handle refers to something that no longer exists,
+and any access raises \code{StaleElementReferenceException}. This is not an edge
+case on a modern site; it is routine.
+\end{jargon}
+
+\code{\_safe\_call} takes a zero-argument function, calls it, and returns
+\code{None} instead of propagating any exception. The granularity is the point:
+it wraps \emph{each individual field access}, not the whole row. So an element
+that goes stale halfway through still produces a row with whatever fields were
+read successfully, rather than blanking the entire table.
+
+\begin{keyidea}{The \code{lambda a=attr:} trick is load-bearing}
+Inside the attribute loop the lambda is written \code{lambda a=attr:
+element.get\_attribute(a)}, not \code{lambda: element.get\_attribute(attr)}.
+Python closures capture \emph{variables}, not values, so a lambda written the
+second way would look up \code{attr} when it is finally called and see whatever
+the loop variable holds at that moment. Binding it as a default argument
+(\code{a=attr}) captures the value at definition time. Here the lambda is called
+immediately so both forms would in fact work, but the defensive form is the
+correct habit and costs nothing.
+\end{keyidea}
+
+\subsection{Verified behaviour}
+
+Because this layer is pure, its claims can simply be checked. Running the real
+functions against fake duck-typed objects confirmed all of the following:
+
+\begin{itemize}
+\item Whitespace is collapsed: a string with a newline and doubled spaces in it
+  comes back as single-spaced. The idiom responsible is
+  \code{" ".join(text.split())}, which splits on any run of whitespace and
+  rejoins with single spaces.
+\item Truncation is exact: 200 characters of input produce a text field of
+  \emph{exactly} 80 characters, being 79 characters plus a single-character
+  ellipsis. The \code{text\_limit - 1} is there precisely so the ellipsis fits
+  inside the budget rather than pushing past it. This is the kind of off-by-one
+  that is usually wrong; here it is right.
+\item An element that raises on every single field access yields
+  \code{(3, '?', '', '')}. The \code{or "?"} fallback fires for the tag, and the
+  row survives.
+\item Attributes not in \code{ATTRIBUTES\_TO\_SHOW} are dropped, and attributes
+  whose value is empty are skipped by the \code{if value:} test, so you never see
+  a useless \code{class=} in the summary.
+\item \code{build\_result\_rows} numbers rows from 1, not 0, because it is
+  display data for a human.
+\end{itemize}
+
+\section{The results window: \code{show\_data()}}
+
+\begin{jargon}{\code{Toplevel} and \code{Treeview}}
+A \code{Toplevel} is a second, independent window owned by the main one. A
+\code{ttk.Treeview} configured with \code{show="headings"} is a multi-column
+table: a spreadsheet-like grid with a header row. It is the standard Tkinter
+answer to ``display a list of records''.
+\end{jargon}
+
+\code{show\_data} first stores \code{last\_elements = list(data\_to\_show)},
+taking a copy so the highlight button has something to work with later, then
+builds the rows, then constructs a fresh window with four columns: \code{index},
+\code{tag}, \code{text}, \code{attributes}. Two scrollbars are attached, vertical
+and horizontal, wired to the tree with the standard
+\code{yscrollcommand}/\code{command} cross-reference.
+
+The layout inside that window is worth noticing because it is done correctly.
+Two calls on the frame, \code{rowconfigure(0, weight=1)} and
+\code{columnconfigure(0, weight=1)}, tell the grid that the table, and only the
+table, absorbs extra space when the window is resized. Without them the table
+would stay a fixed size inside a growing window. Setting
+\code{selectmode="browse"} limits selection to one row at a time.
+
+\begin{honest}{Every lookup opens another window, and nothing closes them}
+\code{show\_data} constructs a new \code{Toplevel} on every single click of ``Get
+Elements''. It never reuses or closes the previous one. Poke at a page ten times,
+which is precisely the workflow the README describes as the reason the tool
+exists, and you have ten stacked result windows to close by hand. Reusing one
+window, or at least destroying the previous, would be a small change. As written,
+the tool's core use case is also the thing that clutters the screen fastest.
+\end{honest}
+
+\begin{honest}{The results table is not sortable, though the README says it is}
+The README's opening paragraph states results ``land in a sortable table''. They
+do not. \code{ttk.Treeview} does not sort by default; making a column sortable
+requires binding a callback to the heading via \code{tree.heading(col,
+command=...)} and re-inserting rows in order. No such binding exists in
+\file{main.py}. The table is scrollable and selectable, but clicking a column
+header does nothing at all. Where the README and the code disagree, the code
+wins, and this is a claim to remove from the README rather than defend.
+\end{honest}
+
+\section{Highlighting: reaching into the live page}
+
+\begin{lstlisting}[language=Python, caption={The JavaScript injected into the real browser}]
+driver.execute_script(
+    "arguments[0].style.outline='3px solid #ff3b81';"
+    "arguments[0].style.outlineOffset='2px';"
+    "arguments[0].scrollIntoView({block: 'center'});",
+    element,
+)
+\end{lstlisting}
+
+\begin{jargon}{\code{execute\_script}}
+Selenium can run arbitrary JavaScript inside the page being viewed. Any Python
+elements passed after the script string arrive in JavaScript as the
+\code{arguments} array, so \code{arguments[0]} \emph{is} the real DOM node
+corresponding to the Python element handle. This is the bridge between the two
+languages, and it is why the outline appears in the actual Chrome window rather
+than in a picture of it.
+\end{jargon}
+
+The script does three things per element: draws a pink outline, offsets that
+outline slightly so it does not sit flush against the content, and scrolls the
+element to the centre of the viewport. The loop counts successes and wraps each in
+\code{try}/\code{except Exception: continue}, so stale elements are skipped rather
+than aborting the run. If every element failed, \code{highlighted} stays 0 and the
+status honestly reports that the page may have changed.
+
+This is the most genuinely useful feature in the tool. It closes the loop between
+``my locator matched 12 things'' and ``are they the 12 things I meant?'', which is
+the question a locator-testing tool exists to answer.
+
+\begin{honest}{Highlighting can point at a page you already left}
+\code{last\_elements} and the highlight button's enabled state are only ever
+updated on a \emph{successful} lookup. Load page A, find elements, then load page
+B: \code{last\_elements} still holds A's handles and the button is still enabled.
+Clicking it now walks handles into a document that is gone. In practice every
+access raises, the loop skips all of them, and the user sees ``Could not highlight
+those elements (page may have changed)'', which is a truthful message arrived at
+by luck rather than design. \code{load\_html} should clear \code{last\_elements}
+and disable the button; it does neither.
+
+The same staleness applies after a \emph{failed} lookup: the function returns
+early without touching either, so the previous result stays live and highlightable
+behind a fresh error message.
+\end{honest}
+
+\section{The interface layer}
+
+\subsection{\code{build\_ui()} and why it is a function}
+
+\code{build\_ui} constructs every widget and returns \code{root}. The README is
+explicit that it was split out from the \code{\_\_main\_\_} block on purpose, so
+that a test can build the entire window against a fake driver without launching
+Chrome. That claim holds up: the whole interface was constructed, driven and torn
+down here without a browser existing.
+
+The layout is a vertical stack of panels built with \code{.pack}, with
+\code{.grid} used \emph{inside} each panel for its local rows and columns. Mixing
+the two managers is fine and idiomatic as long as they never manage the same
+parent, and here they do not.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.92\textwidth}{!}{
+\begin{tikzpicture}[node distance=4mm]
+\node[box, text width=100mm, align=left, fill=white, draw=linegrey] (h)
+  {\textbf{Custom Web Scraper}\\[1pt]
+   \scriptsize\itshape Heading.TLabel, 24pt accent};
+\node[box, text width=100mm, align=left, below=2mm of h, fill=white, draw=linegrey] (sub)
+  {\scriptsize Drive a real Chrome session, then probe it with locator strategies.};
+
+\node[box, text width=100mm, align=left, below=4mm of sub] (p1)
+  {\textbf{1. Load a page}\\[3pt]
+   \scriptsize \code{request\_url\_entry} (Combobox, history of 10)\quad[\,\textbf{Request}\,]\\
+   \scriptsize \code{command=load\_html}};
+
+\node[box, text width=100mm, align=left, below=4mm of p1] (p2)
+  {\textbf{2. Find elements}\\[3pt]
+   \scriptsize Locate by: [\,\code{dropdown\_var} OptionMenu: 7 strategies + ``Select''\,]\\
+   \scriptsize \code{get\_element\_by\_entry} (Combobox, history of 10)\\
+   \scriptsize [\,\textbf{Get Elements}\,]\quad[\,Highlight in Browser: starts disabled\,]\\
+   \scriptsize \code{instructions} label, rewritten by \code{dropdown\_var\_detect}};
+
+\node[box, text width=100mm, align=left, below=4mm of p2, fill=white, draw=linegrey] (sb)
+  {\scriptsize \code{status\_bar}: one line, recolored by severity, \code{side="bottom"}};
+
+\begin{scope}[on background layer]
+\node[draw=inkblue, fill=softgrey, rounded corners, fit=(h)(sub)(p1)(p2)(sb), inner sep=5mm,
+      label={[font=\small\itshape, text=inkblue]above:root, 960x680, minsize 820x600}] {};
+\end{scope}
+\end{tikzpicture}}
+\caption{The main window, top to bottom. The numbered panel titles (``1.'',
+``2.'') encode the required order of operations directly into the interface.}
+\end{figure}
+
+\subsection{Styling}
+
+A palette of seven colour constants sits at the top of the file, plus a
+\code{STATUS\_COLORS} dictionary mapping \code{"info"}, \code{"success"} and
+\code{"error"} to three colours. \code{set\_status} looks the kind up with
+\code{.get(kind, STATUS\_COLORS["info"])}, so an unrecognised kind degrades to
+informational rather than raising.
+
+The \code{ttk} theme is switched to \code{"clam"} inside a
+\code{try}/\code{except tk.TclError: pass}, because \code{clam} is not guaranteed
+present on every platform. That is a correct and cheap piece of defensive
+programming.
+
+\begin{honest}{The widget toolkits are mixed inconsistently}
+Labels, frames and comboboxes are \code{ttk}; the buttons are plain \code{tk}.
+The reason is visible in the code: \code{tk.Button} accepts \code{bg}, \code{fg}
+and \code{bd=0} directly, while a \code{ttk.Button} would need a configured style.
+The consequence is that hover behaviour has to be hand-rolled, which is what
+\code{on\_enter\_button} and \code{on\_leave\_button} are: manual
+\code{<Enter>}/\code{<Leave>} bindings that swap the background colour, work a
+\code{ttk} style would do declaratively via \code{style.map}. And the file
+\emph{does} use \code{style.map} correctly, for \code{Custom.TMenubutton}, a few
+lines away. Both approaches are present in the same function.
+
+Note also that \code{highlight\_button} never gets those hover bindings, and it
+would be a bug if it did: the handlers hardcode \code{ACCENT\_COLOR} as the
+resting colour, but that button rests at \code{FIELD\_BG}. Hovering it would
+permanently change its colour. The omission is correct; whether it was reasoned
+or accidental cannot be told from the source.
+\end{honest}
+
+\subsection{\code{add\_to\_history}: a small function done well}
+
+\begin{lstlisting}[language=Python, caption={add\_to\_history}]
+def add_to_history(combobox, value):
+    if not value:
+        return
+    values = list(combobox["values"])
+    if value in values:
+        values.remove(value)
+    values.insert(0, value)
+    combobox["values"] = values[:10]
+\end{lstlisting}
+
+This implements a most-recently-used list: remove the value if already present,
+push it to the front, cap at 10. Re-entering an old URL moves it back to the top
+rather than duplicating it. It takes the combobox as a parameter, so unlike most
+of this file it is reusable, and both fields do reuse it. Verified: after loading
+one URL the field's dropdown contained exactly that URL.
+
+The history is in memory only and dies with the process, which the README lists
+as a known limitation rather than hiding.
+
+\subsection{\code{dropdown\_var\_detect} and its load-bearing guard}
+
+\begin{lstlisting}[language=Python, caption={The trace callback, abridged}]
+def dropdown_var_detect(*args):
+    if "instructions" not in globals():
+        return
+    value = dropdown_var.get()
+    hints = { "Class": "Enter the class name of the element you want to find", ... }
+    instructions.config(text=hints.get(value, "Pick a locator strategy above"))
+\end{lstlisting}
+
+\begin{jargon}{Variable tracing}
+\code{dropdown\_var.trace("w", dropdown\_var\_detect)} registers a callback that
+Tkinter fires every time the \code{StringVar} is \emph{written}. It is how the
+instructions label stays in sync with the dropdown with no polling and no button.
+\end{jargon}
+
+\begin{keyidea}{The guard that looks like dead code and is not}
+\code{if "instructions" not in globals(): return} looks like leftover paranoia,
+since \code{instructions} is created in \code{build\_ui}. Tracing the actual order
+of execution shows it is essential. Inside \code{build\_ui}, the trace is
+registered, then the \code{OptionMenu} is constructed with its initial value
+\code{"Select"}, and constructing it \emph{writes} the \code{StringVar}, which
+fires the callback \emph{immediately}. At that instant the line that creates the
+\code{instructions} label is still 50 lines further down and has not run. Without
+the guard, the very first callback would raise \code{NameError} during startup,
+every single time.
+
+This is the best example in the codebase of why reading a function in isolation
+misleads you. It is also, notably, the one subtlety the README already documents,
+because a previous pass over this code found the same thing.
+\end{keyidea}
+
+The hint dictionary has an entry per strategy and a \code{.get} default of ``Pick
+a locator strategy above'', which is what the initial \code{"Select"} value falls
+through to. Verified: setting the variable to \code{"Class"} put ``Enter the class
+name of the element you want to find'' into the label.
+
+\section{Shared state: the globals}
+\label{sec:globals}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\node[box] (idle)    at (0,0)    {\textbf{Idle}\\\scriptsize \code{is\_request\_loaded = False}\\\scriptsize lookups refuse};
+\node[box] (loaded)  at (8.4,0)  {\textbf{Loaded}\\\scriptsize \code{is\_request\_loaded = True}\\\scriptsize lookups allowed};
+\node[box] (results) at (8.4,-3.6) {\textbf{Results held}\\\scriptsize \code{last\_elements} non-empty\\\scriptsize highlight enabled};
+
+\draw[flow] (idle) to[bend left=22]
+     node[lbl, above]{\code{driver.get()} returns} (loaded);
+\draw[flow, dashed, draw=warnred] (loaded) to[bend left=22]
+     node[lbl, below, text=warnred]{no code path ever\\does this} (idle);
+\draw[flow] (loaded) to[out=-55, in=55]
+     node[lbl, right, xshift=3mm, pos=0.5]{successful\\lookup} (results);
+\draw[flow] (results) to[out=125, in=-125]
+     node[lbl, left, xshift=-3mm, pos=0.5]{another\\lookup} (loaded);
+\end{tikzpicture}
+\caption{The application's state. The red dashed arrow is the transition that
+\emph{ought} to exist and does not: no code path ever sets
+\code{is\_request\_loaded} back to \code{False}. Once true, always true, for the
+life of the process.}
+\label{fig:state}
+\end{figure}
+
+Three module-level globals carry all state:
+
+\begin{itemize}
+\item \code{driver}: the live Chrome session. Read by six functions.
+\item \code{is\_request\_loaded}: the guard that stops lookups before a page
+  exists.
+\item \code{last\_elements}: the most recent match list, for the highlight button.
+\end{itemize}
+
+\begin{jargon}{Global variable, and why \code{global} appears}
+A \textbf{global} here means a variable at module level, shared by every function
+in the file. Python lets any function \emph{read} one without ceremony, but
+\emph{assigning} to a name inside a function makes it local unless you declare
+\code{global name} first. That is why \code{load\_html} says \code{global
+is\_request\_loaded} (it assigns) and why the lookup functions do too, even though
+they only read it, which is redundant but harmless.
+\end{jargon}
+
+\begin{honest}{\code{driver} is never declared and only exists by luck of ordering}
+Unlike the other two, \code{driver} is never given a module-level default. It
+comes into existence only when \code{if \_\_name\_\_ == "\_\_main\_\_"} assigns
+it. Every function that uses it resolves the name at call time, which is why this
+works at all: by the time any callback fires, the assignment has happened.
+
+The consequence is that \code{import main; main.load\_html()} raises
+\code{NameError: name 'driver' is not defined}. The README describes testing
+against a fake driver, and that is possible, but only by first assigning
+\code{main.driver = fake} from outside, which is exactly what had to be done to
+exercise this code. A module-level \code{driver = None} would document the
+contract instead of leaving it implicit.
+\end{honest}
+
+\begin{honest}{The globals are the project's real architectural debt}
+The README states this itself and it is worth restating precisely. Because seven
+lookup functions read \code{driver} from module scope rather than receiving it,
+none of them can be tested without monkey-patching the module, and the application
+structurally cannot hold two browser sessions at once. A small
+\code{Scraper} class holding \code{driver} and \code{is\_request\_loaded} as
+instance attributes would fix both and is the change the owner should be ready to
+describe.
+
+The counter-argument, which is legitimate: this is a 551-line single-window tool
+where the browser genuinely is a singleton, and globals in a Tkinter script are a
+very well-trodden pattern. The honest framing is not ``this is wrong'' but ``this
+traded testability for brevity, knowingly''.
+\end{honest}
+
+\begin{honest}{\code{build\_ui} declares a global it never assigns}
+The \code{global} statement in \code{build\_ui} lists \code{title} among the
+names it exports. Nothing in the file ever assigns or reads \code{title}. It is
+dead, left over from an earlier version, and harmless, but it is the kind of
+detail an interviewer who reads the code will notice.
+\end{honest}
+
+\section{Dependencies, configuration and licence}
+
+\subsection{One dependency}
+
+\file{requirements.txt} is a single line: \code{selenium>=4.15,<5}.
+
+\begin{keyidea}{Why that version range is right}
+The lower bound is not arbitrary. Selenium Manager, the feature that removes the
+hardcoded driver path, arrived in 4.6, so anything older would break the
+project's portability story. The upper bound \code{<5} excludes a future major
+version, because by convention a major version bump is allowed to break the API.
+Pinning a floor for the feature you need and a ceiling below the next breaking
+change is exactly the correct shape for a dependency range.
+\end{keyidea}
+
+Everything else is standard library: \code{os} for environment variables,
+\code{tkinter} and \code{tkinter.ttk} for the interface. \code{tkinter} ships with
+CPython on Windows and macOS but is a separate package on Debian and Ubuntu
+(\code{python3-tk}), which the README correctly warns about.
+
+\subsection{Configuration and secrets}
+
+\file{.env.example} documents both variables and states that both are optional and
+the app runs with neither set. Neither is a secret: one is a filesystem path, the
+other a boolean. There is no API key, no credential, and nothing to leak.
+\file{.gitignore} nonetheless excludes \code{.env}, which is the right default.
+
+Note that nothing in \file{main.py} actually reads a \code{.env} file: there is no
+\code{python-dotenv} dependency. The variables must be real environment variables.
+\file{.env.example} is documentation of the names, not an input the program parses.
+
+\subsection{Licence}
+
+\file{LICENSE} is PolyForm Strict 1.0.0: the source is public to read, but reuse,
+modification and redistribution are not granted. For a portfolio piece meant to be
+inspected rather than adopted, that is a coherent choice.
+
+\section{Honest findings, collected}
+\label{sec:honest}
+
+Everything below was found by reading the source and, where possible, by running
+it. Nothing here is speculation unless it says so.
+
+\subsection{Defects in the code}
+
+\begin{enumerate}
+\item \textbf{\code{is\_request\_loaded} is set before the load is confirmed}, so
+  a page-load timeout leaves the flag wrongly \code{True}.
+\item \textbf{Only \code{InvalidArgumentException} is caught around
+  \code{driver.get}}, so a dead host or crashed browser produces an uncaught
+  traceback and a frozen-looking status bar.
+\item \textbf{The zero-match code path is unreachable}, so ``no matches'' is
+  reported as ``please enter a valid class name'', blaming the user for a valid
+  locator.
+\item \textbf{\code{last\_elements} and the highlight button are never reset} on
+  navigation or on a failed lookup, so the button stays live pointing at a
+  previous page's elements.
+\item \textbf{Every lookup opens a new \code{Toplevel}} and none are ever closed.
+\item \textbf{\code{driver} has no module-level definition}, so importing the
+  module and calling anything raises \code{NameError} until it is patched in.
+\item \textbf{\code{title} is declared global and never used.}
+\item \textbf{\code{maximize\_window()} runs in the headless path} where it is
+  meaningless.
+\item \textbf{\code{dropdown\_var.trace("w", ...)}} is the legacy Tk API. The
+  modern spelling is \code{trace\_add("write", ...)}. Verified working without a
+  deprecation warning on Python 3.12.3 here, so this is a style point today and a
+  maintenance risk later, not a present bug.
+\end{enumerate}
+
+\subsection{Claims in the README that the code does not support}
+
+The instruction is that where documentation and code disagree, the code wins.
+Three disagreements were found, and all three are the README overstating.
+
+\begin{honest}{The README describes a test suite that is not in the repository}
+The ``What was verified here'' section claims a ``standalone unit test suite''
+of 7 passing cases covering the formatting functions, and a second test that
+builds the window against a live X display and drives it with a fake driver. It
+then says ``see \code{Test plan} below for the exact command and output''.
+
+There is no \code{Test plan} section in the README. There is no test file
+anywhere in the repository: \code{git ls-files} lists eight files and none of them
+is a test. \code{git log} across all history shows a test file was never committed
+and later removed; it was never there.
+
+The underlying claims do appear to be \emph{true}. Equivalent tests were written
+from scratch for this document and every stated behaviour held: the formatting
+functions handle truncation, whitespace, missing attributes and total staleness
+correctly, and the full window does construct and drive against a fake driver on a
+real display. So the honest reading is that the tests were written, run, and then
+not committed, and the cross-reference to a section that was never written is the
+loose thread that exposes it.
+
+This is the most important finding in this document, because an interviewer who
+reads ``all 7 cases pass; see Test plan below'' and then looks for either the
+plan or the tests will find neither. Either commit the tests or remove the claim.
+Do not leave it as is.
+\end{honest}
+
+\begin{honest}{\code{temp.py} and \code{temp1.py} have never existed in this repository}
+The Challenges section says the first working version is ``still visible as
+\code{temp.py} / \code{temp1.py} in the source history before this rewrite''. It
+is not. The repository has four commits, beginning with ``Initial commit: custom
+web scraper'', and searching every commit for every file ever added
+(\code{git log -{}-all -{}-diff-filter=A}) returns eight paths, none named
+\code{temp}. The BeautifulSoup draft the sentence refers to may well have existed
+on the author's machine, but it is not in this history, and the README invites a
+reader to go look for something they cannot find.
+\end{honest}
+
+\begin{honest}{The results table is described as ``sortable'' and is not}
+Covered in full above. \code{ttk.Treeview} sorts only when you bind a command to
+each heading, and \file{main.py} binds none.
+\end{honest}
+
+\begin{honest}{``Two layers in one file'', followed by three bullet points}
+The Architecture section opens ``Two layers in one file, split by
+\code{if \_\_name\_\_ == "\_\_main\_\_":}'' and then lists three: Selenium,
+Tkinter, and pure formatting. A small editing artefact from when the formatting
+layer was added, but it is the first line of the section an interviewer reads.
+Also, the split it names is not what separates the layers; the \code{\_\_main\_\_}
+guard separates definition from execution.
+\end{honest}
+
+\subsection{What the project gets right}
+
+Balance matters, and there is real quality here:
+
+\begin{itemize}
+\item The \code{WebDriverWait} plus expected-conditions pattern is the correct
+  tool for the problem, used consistently, and never a \code{time.sleep}.
+\item The pure formatting layer is a genuine piece of design: extracting the
+  logic that does not need a browser so it can be tested without one is exactly
+  the right instinct, and the per-field \code{\_safe\_call} granularity shows the
+  stale-element problem was actually understood rather than merely caught.
+\item The environment-variable driver resolution is a real fix to a real
+  portability bug, and the version range in \file{requirements.txt} is chosen for
+  a reason.
+\item \code{update\_idletasks} before a blocking call, \code{rowconfigure} weights
+  for resize, the \code{clam} theme in a \code{try}/\code{except}, the dictionary
+  miss doing double duty as validation: these are the marks of someone who has
+  used the toolkit, not just imported it.
+\item The README's ``What I'd do differently'' section is honest about the globals
+  and the duplication without being asked. The gap is in the verification claims,
+  not in the self-assessment.
+\end{itemize}
+
+\section{What was verified for this document}
+
+Every claim below was produced by running code on this machine, not by reading.
+
+\begin{itemize}
+\item \code{python3 -m py\_compile main.py} succeeds. Python 3.12.3,
+  selenium 4.45.0, \code{tkinter} importable.
+\item The formatting layer was driven with fake duck-typed elements: whitespace
+  collapsing, exact 80-character truncation with ellipsis, attribute filtering and
+  skipping of empty values, 1-based row numbering, and a fully stale element
+  yielding \code{(3, '?', '', '')}. All behaved as this document describes.
+\item The complete window was built via \code{build\_ui()} on a real display with
+  \code{main.driver} patched to a fake and \code{WebDriverWait} stubbed. The
+  three callbacks were then driven in turn: first \code{load\_html}, then
+  \code{on\_get\_elements\_click}, then
+  \code{highlight\_in\_browser}. They produced, in order: a ``Loaded'' status naming
+  the test URL; a one-entry URL history; the correct instructions text
+  for ``Class''; a ``Found 2 elements'' status; the highlight button enabled;
+  \code{last\_elements} holding 2 items; a status confirming 2 elements
+  highlighted; and exactly 2 recorded calls to \code{execute\_script}.
+\item The zero-match branch was reached only by stubbing out
+  \code{WebDriverWait}, which is the direct evidence that it is unreachable
+  through the real code path.
+\item The repository's full history was searched for the test file and for
+  \code{temp.py}/\code{temp1.py}. Neither has ever been committed.
+\item \code{StringVar.trace("w", ...)} was confirmed to run without raising or
+  warning on this Python.
+\end{itemize}
+
+\textbf{Not verified:} a live Chrome session against a real website, and the
+highlight JavaScript against a real DOM. That needs a Chrome install and outbound
+network access for Selenium Manager to fetch a driver. The Selenium calls used are
+standard, stable 4.x API, but ``it drives real Chrome correctly'' rests on
+inspection here, not on execution.
+
+\section{Closing summary}
+
+\begin{keyidea}{What to say about this project in one breath}
+A single-file desktop tool that drives real Chrome through Selenium so you can
+test locator strategies against a live, JavaScript-rendered page without writing a
+script per question. Its best idea is extracting the display-formatting logic into
+pure, duck-typed functions that need no browser to test. Its worst is that
+everything else shares state through module globals, which is why the other layers
+cannot be tested the same way. Its most defensible fix is replacing a hardcoded
+Windows chromedriver path with Selenium Manager plus an environment-variable
+override. Its most urgent outstanding job is not in the code at all: the README
+claims a test suite that is not in the repository.
+\end{keyidea}
+
+\end{document}
